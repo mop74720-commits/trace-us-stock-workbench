@@ -24,6 +24,11 @@ exports/
 trace-export*.json
 trace-records*.json
 
+# Local TRACE runtime databases
+/data/
+*.sqlite3-wal
+*.sqlite3-shm
+
 # Editor and operating system files
 .vscode/
 .idea/

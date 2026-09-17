@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#f4f6f9">
+  <title>TRACE · 美股工作台</title>
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='6' fill='%232565d8'/%3E%3Cpath d='M7 23V15m9 8V9m9 14V5' stroke='white' stroke-width='3'/%3E%3C/svg%3E">
+  <link rel="stylesheet" href="styles.css">
+  <script src="logic.js" defer></script>
+  <script src="market-demo.js" defer></script>
+  <script src="market.js" defer></script>
+  <script src="app.js" defer></script>
+</head>
+<body>
+  <a class="skip" href="#main">跳到主要内容</a>
+  <header class="app-header">
+    <div class="header-inner">
+      <a class="brand" href="#overview" aria-label="TRACE 首页"><svg viewBox="0 0 32 32" aria-hidden="true"><rect width="32" height="32" rx="6" fill="currentColor"/><path d="M8 24V16m8 8V10m8 14V6" stroke="white" stroke-width="3"/></svg><strong>TRACE</strong><span>美股工作台</span></a>
+      <div class="header-actions"><select id="data-mode" aria-label="数据模式"><option value="live">真实行情</option><option value="demo">模拟数据</option></select><button class="btn secondary" id="refresh-data">刷新</button><button class="btn secondary export-button" data-export>导出记录</button><button class="icon-button" id="help" aria-label="使用说明">?</button><span class="avatar" aria-label="本地账户">T</span></div>
+    </div>
+    <div class="nav-bar"><nav id="nav" aria-label="主导航"></nav><span class="nav-info">个人账户 <span class="separator">/</span> USD</span></div>
+  </header>
+  <main id="main" tabindex="-1"></main>
+  <footer><span id="data-footer">Yahoo Finance · 等待数据</span><span>持仓数量与回测为演示 · 未接入 AI 或券商</span></footer>
+  <dialog id="detail" aria-labelledby="dialog-title"><div id="dialog-content"></div></dialog>
+  <div id="toast" role="status" aria-live="polite"></div>
+</body>
+</html>

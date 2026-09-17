@@ -1,0 +1,2 @@
+# IANA timezone data for zoneinfo, including Windows environments.
+tzdata>=2024.1

@@ -1,0 +1,31 @@
+# Local research and browser artifacts
+/work/
+/output/
+/outputs/
+/.playwright-cli/
+
+# Dependencies and caches
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+node_modules/
+.pytest_cache/
+.cache/
+
+# Credentials and local records
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.log
+exports/
+trace-export*.json
+trace-records*.json
+
+# Editor and operating system files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

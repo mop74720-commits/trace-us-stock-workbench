@@ -249,21 +249,28 @@ class IntelligenceHub:
 
     def status(self, as_of=None):
         now=time.time() if as_of is None else as_of
+        historical=as_of is not None
         with self.lock:
             sources=[]
             for source in self.sources:
-                state=self._state(source.id)
+                if historical:
+                    row=self.db.execute("SELECT payload FROM polls WHERE source_id=? AND observed_at<=? ORDER BY observed_at DESC,seq DESC LIMIT 1",(source.id,now)).fetchone()
+                    state=json.loads(row[0]) if row else {}
+                else:
+                    state=self._state(source.id)
                 public={k:v for k,v in state.items() if k not in {"cursor","etag","last_modified"}}
                 health="disabled" if not source.enabled else "pending" if not state.get("last_attempt") else "error" if state.get("error") else "stale" if now-state.get("last_success",0)>max(120,source.interval_seconds*3) else "healthy"
                 sources.append({**source.public(),**public,"health":health})
             enabled=[s for s in sources if s["enabled"]]
             latest=self._latest(now)
-            version_counts=dict(self.db.execute("SELECT json_extract(payload,'$.kind'),count(*) FROM evidence GROUP BY json_extract(payload,'$.kind')"))
+            version_counts=dict(self.db.execute("SELECT json_extract(payload,'$.kind'),count(*) FROM evidence WHERE observed_at<=? GROUP BY json_extract(payload,'$.kind')",(now,)))
+            versions=self.db.execute("SELECT count(*) FROM evidence WHERE observed_at<=?",(now,)).fetchone()[0]
+            observations=self.db.execute("SELECT count(*) FROM observations WHERE observed_at<=?",(now,)).fetchone()[0]
             return {"health":"disabled" if not enabled else "healthy" if all(s["health"]=="healthy" for s in enabled) else "degraded",
-                    "sources":sources,"collecting":self.collect_lock.locked(),"last_error":self.last_error,
-                    "versions":self.db.execute("SELECT count(*) FROM evidence").fetchone()[0],"items":len(latest),
+                    "sources":sources,"collecting":False if historical else self.collect_lock.locked(),"last_error":None if historical else self.last_error,
+                    "versions":versions,"items":len(latest),
                     "report_versions":version_counts.get("report",0),"quote_versions":version_counts.get("prediction_market",0),
-                    "observations":self.db.execute("SELECT count(*) FROM observations").fetchone()[0],
+                    "observations":observations,
                     "quarantined":sum(i["quarantined"] for i in latest),"filtered":sum(not i["relevant"] for i in latest),
                     "as_of":now,"retention":"append_only","item_window_limit":2000}
 

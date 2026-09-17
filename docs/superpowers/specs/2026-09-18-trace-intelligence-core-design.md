@@ -87,7 +87,7 @@ X / JSONL (optional) ─┤      │              ▲
 
 Intelligence Core must not depend on Trader's `Engine`, synthetic `market.py`, portfolio positions, paper exchange, cognition runtime, or Trader web assets.
 
-Any existing Trader intelligence method that currently accepts holdings or synthetic market context must continue to support explicit caller-provided context, but TRACE will supply only TRACE-owned watchlist/market identifiers in Phase 1.
+Any migrated intelligence method that accepts caller context must receive an explicit context object. TRACE Phase 1 supplies only watchlist/asset context; it never derives context from Trader trading state.
 
 ## 5. Target package layout for Phase 1
 
@@ -123,7 +123,7 @@ trace-us-stock-workbench/
 └─ requirements.txt
 ```
 
-The exact file paths may be adjusted during implementation only when required by import mechanics, but responsibility boundaries must remain unchanged.
+The exact file paths may change only when Python import mechanics require it. Module responsibilities and public HTTP contracts defined here must not change during Phase 1 without a spec revision.
 
 ## 6. HTTP API contract
 
@@ -142,22 +142,24 @@ Phase 1 adds intelligence endpoints under the same TRACE server and origin:
 - `GET /api/intelligence/evidence/{id}`
 - `POST /api/intelligence/collect`
 
-The migrated routes should preserve Trader's filtering semantics where practical, including:
+Supported query parameters in Phase 1 are:
 
-- `assets`
-- `market`
-- `person`
-- `origin`
-- `mode`
-- `category`
-- `source`
-- `q`
-- `window`
-- `offset`
-- `limit`
-- `as_of`
+- `assets`: comma-separated asset/watchlist symbols, maximum 100 characters;
+- `market`: `all` or `us`;
+- `person`: empty, `trump`, `musk`, or `powell`;
+- `origin`: `all`, `report`, `account_post`, or `imported_post`;
+- `mode`: migrated intelligence feed modes supported by the source service, including `selected` and `timeline`;
+- `category`: source-service category filter;
+- `source`: source ID filter;
+- `q`: text query;
+- `window`: source-service supported window such as `24h`;
+- `offset`: non-negative integer;
+- `limit`: positive bounded integer accepted by the migrated service;
+- `as_of`: ISO-8601 timestamp with timezone.
 
-Invalid time formats, unsupported filters, oversized list parameters, and invalid pagination return 4xx responses rather than silently coercing input.
+Phase 1 does not expose Trader's `holdings` query parameter because TRACE has no authoritative persisted portfolio state in the backend yet. Portfolio context is deferred to the future `DecisionContext` layer.
+
+Invalid time formats, unsupported enumerated filters, oversized asset input, invalid pagination, and malformed integers return 400-series responses rather than being silently coerced.
 
 ## 7. Intelligence brief contract
 
@@ -230,14 +232,14 @@ Preserve the strongest semantics already present in Trader Intelligence:
 
 ## 10. Source policy
 
-Default enabled public sources remain the existing public US-market set where the migrated configuration supports them:
+Default enabled public sources remain the existing public US-market set:
 
 - CNBC RSS;
 - MarketWatch RSS;
 - Federal Reserve RSS;
 - White House RSS.
 
-Optional/disabled adapters may remain present but disabled:
+Optional adapters remain present but disabled by default:
 
 - X recent search;
 - local JSONL imports;
@@ -245,18 +247,33 @@ Optional/disabled adapters may remain present but disabled:
 - Polymarket;
 - CoinDesk.
 
-X must remain explicitly opt-in and must never require a token for default TRACE startup.
+X is explicitly opt-in and never required for default TRACE startup.
 
 No credential is committed to the repository. No source adapter may publish posts, send messages, log in to social accounts, or place trades.
 
-## 11. Server lifecycle
+## 11. Server lifecycle and CLI
 
 TRACE remains a loopback-only local application.
+
+Existing invocation remains valid:
+
+```text
+python demo/server.py --port 8765
+```
+
+Phase 1 adds these optional arguments:
+
+- `--no-intelligence`: disable Intelligence Core entirely;
+- `--intel-config PATH`: intelligence source config; default `config/intelligence.sources.json` relative to repository root;
+- `--intel-db PATH`: intelligence SQLite file; default `data/intelligence.sqlite3` relative to repository root;
+- `--enable-x-api`: explicitly permit enabled X source adapters to use their configured bearer-token environment variable.
+
+Default startup must succeed without an X token, LLM key, broker credential, or paid service.
 
 On startup:
 
 1. initialize existing market caches;
-2. initialize Intelligence Core unless disabled by an explicit CLI flag;
+2. initialize Intelligence Core unless `--no-intelligence` is set;
 3. start the intelligence collection worker;
 4. start the single TRACE HTTP server.
 
@@ -266,15 +283,15 @@ On shutdown:
 2. close intelligence storage cleanly;
 3. stop the HTTP server.
 
-Network collection must not block the request thread for routine page rendering. Manual collection should request/schedule a collection cycle rather than perform arbitrary long network work inline when the migrated service already supports asynchronous collection.
+Network collection must not block the request thread for routine page rendering. `POST /api/intelligence/collect` requests/schedules a collection cycle and returns promptly; it does not perform an unbounded network collection inline.
 
 ## 12. Persistence
 
-Use a dedicated SQLite intelligence database under `data/`, separate from browser-local TRACE trade-plan storage.
+Use the dedicated SQLite database `data/intelligence.sqlite3` by default, separate from browser-local TRACE trade-plan storage.
 
 Phase 1 does not migrate the Trader trading database.
 
-The intelligence database schema and migration behavior should initially remain compatible with the source Trader implementation to reduce migration risk.
+The intelligence database schema and migration behavior initially remain compatible with the source Trader implementation to reduce migration risk.
 
 Generated runtime databases remain gitignored.
 
@@ -306,12 +323,12 @@ Preserve TRACE's fail-closed data behavior:
 - invalid links are rejected;
 - APIs return structured errors;
 - application remains bound to `127.0.0.1`;
-- same-origin rules apply to state-changing POST operations;
+- state-changing intelligence POST requests require same-origin local requests;
 - no API credentials are returned to the browser;
 - unsupported `/api/*` routes return 404;
 - upstream source failures do not crash the whole application.
 
-Intelligence-specific failures must degrade only the intelligence panel unless startup cannot safely initialize its database.
+Intelligence-specific failures degrade only the intelligence panel/API. If Intelligence Core cannot initialize safely, startup fails unless the user explicitly starts with `--no-intelligence`; TRACE must not silently claim that intelligence is enabled.
 
 ## 15. Testing strategy
 
@@ -339,9 +356,11 @@ Required test groups:
    - `/api/market` still works with intelligence enabled;
    - `/api/intelligence/brief` contains no synthetic market payload;
    - `/api/intelligence/evidence/{id}` returns correct 404 behavior;
+   - unsupported `holdings` context is not accepted as a Phase-1 API contract;
    - invalid query inputs return 4xx;
    - intelligence failure does not alter market API responses;
-   - server starts without X token or LLM configuration.
+   - server starts without X token or LLM configuration;
+   - `--no-intelligence` preserves market/news functionality.
 
 4. Frontend regression tests
    - existing market-mode tests remain green;
@@ -349,12 +368,12 @@ Required test groups:
 
 ## 16. Migration sequence
 
-Implementation should be split into small reviewable commits:
+Implementation is split into small reviewable commits:
 
 1. add package/config scaffolding and migrate Intelligence Core with imports adjusted only;
 2. migrate intelligence tests and make them green inside TRACE;
 3. remove dependencies on Trader Engine/synthetic-market state;
-4. expose intelligence routes from TRACE `demo/server.py`;
+4. expose intelligence routes and lifecycle flags from TRACE `demo/server.py`;
 5. add TRACE intelligence frontend module and navigation;
 6. add integration/regression tests;
 7. update README and architecture notes.

@@ -1,4 +1,4 @@
-"""Local-only TRACE data gateway. Standard library; no keys or external writes."""
+"""Local-only TRACE data gateway. Public market reads plus read-only intelligence."""
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
@@ -9,6 +9,7 @@ import argparse
 import copy
 import json
 import math
+import sys
 import threading
 import time
 import urllib.error
@@ -18,11 +19,18 @@ import xml.etree.ElementTree as ET
 from zoneinfo import ZoneInfo
 
 ROOT = Path(__file__).resolve().parent
+REPO_ROOT = ROOT.parent
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from trace.contracts.intelligence import build_intelligence_brief, parse_intelligence_query
+from trace.intelligence.service import IntelligenceHub
+
 SYMBOLS = ('SPY', 'QQQ', 'IWM', 'NVDA', 'MSFT', 'AMD', 'AAPL', 'TSLA')
 NEWS_SYMBOLS = SYMBOLS[3:]
 ET_ZONE = ZoneInfo('America/New_York')
 SOURCE = 'Yahoo Finance'
-USER_AGENT = 'Mozilla/5.0 (compatible; TraceLocalDemo/0.2)'
+USER_AGENT = 'Mozilla/5.0 (compatible; TraceLocalDemo/0.3)'
 
 
 def utc_now():
@@ -62,13 +70,11 @@ def normalize_chart(document, symbol, fetched_at):
     if not numeric(quote_timestamp) or not numeric(last) or last <= 0:
         raise ValueError('缺少有效报价或报价时间')
     quote_date = datetime.fromtimestamp(quote_timestamp, ET_ZONE).date().isoformat()
-    # Today's daily bar is still forming. Align its endpoint with the quote.
     points_by_date[quote_date] = {'date': quote_date, 'close': last}
     points = sorted((p for day, p in points_by_date.items() if day <= quote_date), key=lambda p: p['date'])
     previous_points = [p for p in points if p['date'] < quote_date]
     if not previous_points:
         raise ValueError('缺少前一交易日收盘价')
-    # chartPreviousClose in a 3mo response is the range baseline, NOT yesterday.
     previous = previous_points[-1]['close']
     regular = meta.get('currentTradingPeriod', {}).get('regular', {})
     now = time.time()
@@ -175,46 +181,137 @@ def news_payload():
             'items': sorted(merged.values(), key=lambda item: item['publishedAt'], reverse=True)[:50]}
 
 
-class Handler(SimpleHTTPRequestHandler):
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, directory=str(ROOT), **kwargs)
+def handler_for(intelligence=None):
+    class Handler(SimpleHTTPRequestHandler):
+        intelligence_hub = intelligence
 
-    def end_headers(self):
-        self.send_header('Cache-Control', 'no-store')
-        self.send_header('X-Content-Type-Options', 'nosniff')
-        super().end_headers()
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, directory=str(ROOT), **kwargs)
 
-    def send_json(self, value, status=200):
-        raw = json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8')
-        self.send_response(status)
-        self.send_header('Content-Type', 'application/json; charset=utf-8')
-        self.send_header('Content-Length', str(len(raw)))
-        self.end_headers()
-        self.wfile.write(raw)
+        def log_message(self, format, *args):
+            pass
 
-    def do_GET(self):
-        path = urllib.parse.urlsplit(self.path).path
-        if path == '/api/health':
-            self.send_json({'service': 'trace-data', 'source': SOURCE, 'symbols': SYMBOLS})
-        elif path == '/api/market':
-            self.send_json(market_payload())
-        elif path == '/api/news':
-            self.send_json(news_payload())
-        elif path.startswith('/api/'):
-            self.send_json({'error': 'Not found'}, 404)
-        elif path in ('/', '/index.html', '/styles.css', '/logic.js', '/market.js', '/market-demo.js', '/app.js'):
-            super().do_GET()
-        else:
-            self.send_error(404)
+        def end_headers(self):
+            self.send_header('Cache-Control', 'no-store')
+            self.send_header('X-Content-Type-Options', 'nosniff')
+            super().end_headers()
+
+        def send_json(self, value, status=200):
+            raw = json.dumps(value, ensure_ascii=False, allow_nan=False).encode('utf-8')
+            self.send_response(status)
+            self.send_header('Content-Type', 'application/json; charset=utf-8')
+            self.send_header('Content-Length', str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
+        def intelligence_query(self, split):
+            return parse_intelligence_query(urllib.parse.parse_qs(split.query, keep_blank_values=True))
+
+        def do_GET(self):
+            split=urllib.parse.urlsplit(self.path)
+            path=split.path
+            if path == '/api/health':
+                self.send_json({'service': 'trace-data', 'source': SOURCE, 'symbols': SYMBOLS})
+            elif path == '/api/market':
+                self.send_json(market_payload())
+            elif path == '/api/news':
+                self.send_json(news_payload())
+            elif path.startswith('/api/intelligence'):
+                self.handle_intelligence_get(path, split)
+            elif path.startswith('/api/'):
+                self.send_json({'error': 'Not found'}, 404)
+            elif path in ('/', '/index.html', '/styles.css', '/logic.js', '/market.js', '/market-demo.js', '/intelligence.js', '/app.js'):
+                super().do_GET()
+            else:
+                self.send_error(404)
+
+        def handle_intelligence_get(self, path, split):
+            hub=self.intelligence_hub
+            if hub is None:
+                return self.send_json({'error':'Intelligence subsystem is disabled'},503)
+            if path.startswith('/api/intelligence/evidence/'):
+                identifier=path.rsplit('/',1)[-1]
+                item=hub.evidence(identifier)
+                return self.send_json(item) if item else self.send_json({'error':'Evidence not found'},404)
+            try:
+                parsed=self.intelligence_query(split)
+                if path == '/api/intelligence/brief':
+                    return self.send_json(build_intelligence_brief(hub,parsed))
+                if path == '/api/intelligence/feed':
+                    return self.send_json(hub.feed(parsed['as_of'],parsed['context'],mode=parsed['mode'],category=parsed['category'],
+                                                   source_id=parsed['source_id'],query=parsed['query'],window=parsed['window'],
+                                                   offset=parsed['offset'],limit=parsed['limit'],market=parsed['market'],
+                                                   person=parsed['person'],origin=parsed['origin']))
+                if path == '/api/intelligence/digest':
+                    return self.send_json(hub.digest(parsed['as_of'],context=parsed['context']))
+                if path == '/api/intelligence':
+                    historical=parsed['as_of'] is not None
+                    return self.send_json({'status':hub.status(parsed['as_of']),'digest':hub.digest(parsed['as_of'],context=parsed['context']),
+                                           'notifications':[] if historical else hub.notifications(),
+                                           'recent':[] if historical else hub.recent_evidence()})
+                return self.send_json({'error':'Not found'},404)
+            except (ValueError,TypeError):
+                return self.send_json({'error':'Invalid intelligence query'},400)
+
+        def valid_local_origin(self):
+            host=self.headers.get('Host','')
+            allowed={f'127.0.0.1:{self.server.server_port}',f'localhost:{self.server.server_port}'}
+            return host in allowed and self.headers.get('Origin','') == f'http://{host}'
+
+        def do_POST(self):
+            path=urllib.parse.urlsplit(self.path).path
+            if path != '/api/intelligence/collect':
+                return self.send_json({'error':'Not found'},404)
+            if self.intelligence_hub is None:
+                return self.send_json({'error':'Intelligence subsystem is disabled'},503)
+            if not self.valid_local_origin():
+                return self.send_json({'error':'Only same-origin local commands are accepted'},403)
+            if self.headers.get('Content-Type') != 'application/json':
+                return self.send_json({'error':'Use application/json'},415)
+            try:
+                length=int(self.headers.get('Content-Length','0'))
+                if not 0<=length<=4096:
+                    return self.send_json({'error':'Payload too large'},413)
+                body=json.loads(self.rfile.read(length) or b'{}')
+                if not isinstance(body,dict):
+                    raise ValueError('Expected object')
+            except (ValueError,TypeError,json.JSONDecodeError):
+                return self.send_json({'error':'Invalid JSON'},400)
+            self.intelligence_hub.request_collection()
+            return self.send_json({'ok':True})
+
+    return Handler
+
+
+Handler=handler_for(None)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--port', type=int, default=8765)
+    parser.add_argument('--no-intelligence', action='store_true', help='Disable public intelligence collection and APIs')
+    parser.add_argument('--intel-config', type=Path, default=REPO_ROOT/'config'/'intelligence.sources.json')
+    parser.add_argument('--intel-db', type=Path, default=REPO_ROOT/'data'/'intelligence.sqlite3')
+    parser.add_argument('--enable-x-api', action='store_true', help='Explicitly enable configured X API reads; provider billing may apply')
+    args = parser.parse_args()
+    hub=None
+    server=None
+    try:
+        if not args.no_intelligence:
+            hub=IntelligenceHub.from_config(args.intel_db.resolve(),args.intel_config.resolve(),args.enable_x_api)
+            hub.start()
+        server = ThreadingHTTPServer(('127.0.0.1', args.port), handler_for(hub))
+        intelligence_state='disabled' if hub is None else 'enabled'
+        print(f'TRACE http://127.0.0.1:{args.port} | Yahoo Finance | intelligence={intelligence_state} | local only', flush=True)
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if server is not None:
+            server.server_close()
+        if hub is not None:
+            hub.close()
 
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser()
-    parser.add_argument('--port', type=int, default=8765)
-    args = parser.parse_args()
-    server = ThreadingHTTPServer(('127.0.0.1', args.port), Handler)
-    print(f'TRACE http://127.0.0.1:{args.port} | Yahoo Finance | local only', flush=True)
-    try:
-        server.serve_forever()
-    except KeyboardInterrupt:
-        server.server_close()
+    main()
